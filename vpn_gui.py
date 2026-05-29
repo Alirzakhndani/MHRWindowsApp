@@ -11,6 +11,7 @@ import webbrowser
 from proxy_server import ProxyServer
 from cert_installer import install_ca, is_ca_trusted
 from mitm import CA_CERT_FILE, MITMCertManager
+from vless_config import build_vless_uri, config_to_vless_defaults
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -43,7 +44,7 @@ class VPNApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("MasterVPN")
-        self.geometry("450x550")
+        self.geometry("450x600")
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.proxy_loop = None
@@ -177,6 +178,19 @@ class VPNApp(ctk.CTk):
         )
         self.connect_btn.pack(pady=20)
 
+        self.vless_btn = ctk.CTkButton(
+            self,
+            text="V2BOX VLESS CONFIG",
+            font=("Segoe UI", 14, "bold"),
+            width=220,
+            height=42,
+            corner_radius=21,
+            fg_color="#1f6aa5",
+            hover_color="#144870",
+            command=self.open_vless_converter
+        )
+        self.vless_btn.pack(pady=(0, 12))
+
         self.links_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.links_frame.pack(pady=5)
 
@@ -210,6 +224,10 @@ class VPNApp(ctk.CTk):
 
         self.proxy_label = ctk.CTkLabel(self, text="Status: Disconnected", font=("Segoe UI", 14))
         self.proxy_label.pack(pady=15)
+
+    def open_vless_converter(self):
+        self.save_config()
+        VlessConverterWindow(self, self.config)
 
     def toggle_connection(self):
         if not self.is_running:
@@ -274,6 +292,120 @@ class VPNApp(ctk.CTk):
         set_system_proxy(False)
         self.destroy()
         os._exit(0)
+
+
+class VlessConverterWindow(ctk.CTkToplevel):
+    def __init__(self, master, config):
+        super().__init__(master)
+        self.title("VLESS Config for V2BOX")
+        self.geometry("620x720")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+        self.defaults = config_to_vless_defaults(config)
+        self._entries = {}
+        self._setup_ui()
+        self.generate()
+
+    def _setup_ui(self):
+        title = ctk.CTkLabel(self, text="VLESS Config for iPhone V2BOX", font=("Segoe UI", 22, "bold"))
+        title.pack(pady=(20, 4))
+        note = ctk.CTkLabel(
+            self,
+            text="Edit these values to match your VLESS-capable server, then copy/import the link in V2BOX.",
+            font=("Segoe UI", 12),
+            text_color="#c8c8c8",
+            wraplength=560,
+        )
+        note.pack(pady=(0, 12))
+
+        form = ctk.CTkFrame(self)
+        form.pack(fill="x", padx=22, pady=8)
+
+        rows = [
+            ("name", "Profile Name"),
+            ("user_id", "UUID / Auth ID"),
+            ("address", "Server Address"),
+            ("port", "Port"),
+            ("sni", "TLS SNI"),
+            ("host", "WebSocket Host"),
+            ("path", "WebSocket Path"),
+            ("fingerprint", "Fingerprint"),
+            ("alpn", "ALPN"),
+            ("flow", "Flow (optional)"),
+        ]
+        for row, (key, label) in enumerate(rows):
+            ctk.CTkLabel(form, text=label, anchor="w", width=140).grid(row=row, column=0, padx=(14, 8), pady=6, sticky="w")
+            entry = ctk.CTkEntry(form, width=390)
+            entry.grid(row=row, column=1, padx=(0, 14), pady=6, sticky="ew")
+            entry.insert(0, str(self.defaults.get(key, "")))
+            self._entries[key] = entry
+        form.grid_columnconfigure(1, weight=1)
+
+        options = ctk.CTkFrame(self, fg_color="transparent")
+        options.pack(fill="x", padx=22, pady=(4, 8))
+        self.security_var = tk.StringVar(value=self.defaults.get("security", "tls"))
+        self.transport_var = tk.StringVar(value=self.defaults.get("transport", "ws"))
+        self.allow_insecure_var = tk.BooleanVar(value=bool(self.defaults.get("allow_insecure", False)))
+        ctk.CTkLabel(options, text="Security").grid(row=0, column=0, padx=(0, 8), sticky="w")
+        ctk.CTkOptionMenu(options, values=["tls", "reality", "none"], variable=self.security_var, width=130).grid(row=0, column=1, padx=(0, 18))
+        ctk.CTkLabel(options, text="Transport").grid(row=0, column=2, padx=(0, 8), sticky="w")
+        ctk.CTkOptionMenu(options, values=["ws", "tcp", "grpc"], variable=self.transport_var, width=130).grid(row=0, column=3, padx=(0, 18))
+        ctk.CTkCheckBox(options, text="Allow insecure TLS", variable=self.allow_insecure_var).grid(row=0, column=4, sticky="w")
+
+        buttons = ctk.CTkFrame(self, fg_color="transparent")
+        buttons.pack(fill="x", padx=22, pady=8)
+        ctk.CTkButton(buttons, text="Generate", command=self.generate, width=120).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(buttons, text="Copy Link", command=self.copy_link, width=120).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(buttons, text="Open V2BOX Import", command=self.open_import_link, width=160).pack(side="left")
+
+        self.status_label = ctk.CTkLabel(self, text="", anchor="w")
+        self.status_label.pack(fill="x", padx=24, pady=(4, 0))
+
+        self.output = ctk.CTkTextbox(self, width=570, height=170, wrap="word")
+        self.output.pack(padx=22, pady=(8, 12), fill="both")
+
+        help_text = (
+            "Important: VLESS is a different protocol from the built-in MasterVPN/App Script relay. "
+            "This tool creates a VLESS share link for clients such as V2BOX; the remote server must also run "
+            "a compatible VLESS inbound with matching UUID, transport, TLS/SNI, host, and path."
+        )
+        ctk.CTkLabel(self, text=help_text, wraplength=560, justify="left", text_color="#ffcc66").pack(padx=24, pady=(0, 14))
+
+    def _values(self):
+        values = {key: entry.get().strip() for key, entry in self._entries.items()}
+        values["security"] = self.security_var.get()
+        values["transport"] = self.transport_var.get()
+        values["allow_insecure"] = self.allow_insecure_var.get()
+        return values
+
+    def generate(self):
+        try:
+            values = self._values()
+            uri = build_vless_uri(**values)
+        except Exception as exc:
+            self.status_label.configure(text=f"Error: {exc}", text_color="red")
+            return
+        self.output.configure(state="normal")
+        self.output.delete("1.0", tk.END)
+        self.output.insert("1.0", uri)
+        self.output.configure(state="disabled")
+        self.status_label.configure(text="VLESS link generated.", text_color="#28a745")
+
+    def copy_link(self):
+        self.generate()
+        uri = self.output.get("1.0", tk.END).strip()
+        if uri:
+            self.clipboard_clear()
+            self.clipboard_append(uri)
+            self.status_label.configure(text="Copied VLESS link to clipboard.", text_color="#28a745")
+
+    def open_import_link(self):
+        self.generate()
+        uri = self.output.get("1.0", tk.END).strip()
+        if uri:
+            webbrowser.open(uri)
+
 
 if __name__ == "__main__":
     app = VPNApp()
